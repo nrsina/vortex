@@ -1,0 +1,72 @@
+tick_rate_hz = 60
+debug_enabled = false
+
+[capture]
+# Bytes captured per packet (libpcap snaplen). Higher lets DPI read deeper
+# into the payload — TLS SNI / DNS query names live past byte 96 — at the
+# cost of copying more per frame. Bandwidth accounting always uses the full
+# wire length, so this never affects reported throughput. Clamped to
+# 96..=65_535.
+snaplen = 512
+# Promiscuous mode: capture frames not addressed to this host. Off by
+# default — on a switched network it mostly adds noise and some environments
+# disallow it.
+promisc = false
+
+[processes]
+# Disable to skip spawning the snapshot thread (e.g. environments without
+# sock_diag / libproc). Flows still render, just without PID attribution.
+enabled = true
+# Snapshot the OS socket table this often (ms). Clamped to 250..=10000.
+poll_interval_ms = 1000
+
+[dns]
+# Disable to skip spawning rDNS workers. The dst column then shows raw IPs
+# and the details overlay reports "(disabled)" for hostname rows.
+enabled = true
+# Re-query each IP at most once per N seconds. Clamped to 60..=86_400.
+cache_ttl_seconds = 3600
+# Number of worker threads. Two is enough to keep one stalled query from
+# bottlenecking enrichment; bump higher on a host that talks to thousands
+# of unique IPs/second. Clamped to 1..=16.
+worker_threads = 2
+# Cap on pending request queue depth. New enqueues are dropped (with a
+# warn) when the queue is full; the affected IPs retry on the next tick.
+# Clamped to 256..=100_000.
+request_queue_cap = 10000
+# Global token-bucket rate cap for outgoing PTR queries, queries-per-second
+# shared across all workers. Smooths bursts so we don't hammer the resolver.
+# Clamped to 1..=10_000.
+dns_qps_cap = 50
+# Per-thread failure backoff. After this many consecutive Failed outcomes,
+# the worker sleeps `failure_backoff_seconds` before continuing. A single
+# success resets the counter. Clamped to 1..=1000.
+failure_backoff_threshold = 10
+# Backoff sleep duration after the threshold is crossed (seconds). Clamped
+# to 1..=600.
+failure_backoff_seconds = 30
+# Cap on the in-memory hostname cache. Once exceeded, least-recently inserted
+# entries are evicted (an LRU policy). Stops the cache from growing unbounded
+# on hosts that see many short-lived peers (scanners, P2P, port scans).
+# Clamped to 256..=1_000_000.
+cache_cap = 10000
+
+[flows]
+# Seconds of silence before a flow is marked "expired". Expired flows are not
+# deleted — they're dimmed, drop out of the "active" header count, and stay
+# inspectable. A returning packet revives the flow with its history intact.
+# Clamped to 5..=86_400.
+idle_timeout_seconds = 30
+# Max expired flows retained in memory. There is no time-based hard delete
+# (keeping expired flows is the point); only when the expired set exceeds this
+# cap are the oldest (by last packet) evicted. Bounds memory on hosts that see
+# many short-lived peers. Clamped to 100..=1_000_000.
+expired_cap = 10000
+
+[dpi]
+# Deep-packet inspection: extract the app-layer hostname (TLS SNI from a
+# ClientHello, the query name from DNS/mDNS) and surface it in the flow
+# details overlay. Disable to skip all payload parsing in the capture thread.
+# Needs [capture].snaplen large enough to reach the payload — SNI / DNS names
+# live well past byte 96, so the default snaplen of 512 is recommended.
+enabled = true

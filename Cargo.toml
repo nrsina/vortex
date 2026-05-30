@@ -1,0 +1,36 @@
+[package]
+name = "vortex"
+version = "0.1.0"
+authors = ["Sina Nourian <sina.nourian@gmail.com>"]
+edition = "2024"
+
+[dependencies]
+bevy_app = "0.18"
+bevy_ecs = { version = "0.18", features = ["multi_threaded"] }
+bevy_state = "0.18"
+bevy_time = "0.18"
+ratatui = { version = "0.30", features = ["crossterm_0_29"] }
+crossterm = "0.29"
+crossbeam-channel = "0.5"
+rustc-hash = "2"
+pcap = "2"
+etherparse = "0.20"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = true, features = [
+    "env-filter",
+    "parking_lot",
+    "smallvec",
+    "fmt",
+    "tracing-log",
+    "std",
+    "ansi",
+] }
+tracing-appender = "0.2"
+config = { version = "0.15", features = ["toml"] }
+netstat2 = "0.11"
+sysinfo = { version = "0.39", default-features = false, features = [
+    "system",
+    "user",
+] }
+dns-lookup = "3"
