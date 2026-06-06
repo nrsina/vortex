@@ -1,6 +1,5 @@
 //! Shared constructors for `#[cfg(test)]` modules across `core::flows`.
 //! Add a helper here only once a second caller appears — no premature helpers.
-#![allow(dead_code)]
 
 use std::net::IpAddr;
 
