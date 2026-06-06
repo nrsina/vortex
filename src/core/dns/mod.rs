@@ -144,6 +144,94 @@ impl RdnsCache {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Instant;
+
+    use super::*;
+
+    fn ip(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(1, 2, 3, last))
+    }
+
+    fn resolved(host: &str) -> RdnsEntry {
+        RdnsEntry { status: RdnsStatus::Resolved(host.to_string()), last_lookup: Instant::now() }
+    }
+
+    fn pending() -> RdnsEntry {
+        RdnsEntry { status: RdnsStatus::Pending, last_lookup: Instant::now() }
+    }
+
+    #[test]
+    fn insert_and_get_round_trips() {
+        let mut cache = RdnsCache::with_cap(10);
+        cache.insert(ip(1), resolved("example.com"));
+        let e = cache.get(&ip(1)).expect("entry should be present");
+        assert!(matches!(&e.status, RdnsStatus::Resolved(h) if h == "example.com"));
+    }
+
+    #[test]
+    fn contains_key_true_after_insert() {
+        let mut cache = RdnsCache::with_cap(10);
+        assert!(!cache.contains_key(&ip(1)));
+        cache.insert(ip(1), pending());
+        assert!(cache.contains_key(&ip(1)));
+    }
+
+    #[test]
+    fn hostname_returns_resolved_hostname() {
+        let mut cache = RdnsCache::with_cap(10);
+        cache.insert(ip(1), resolved("host.example.com"));
+        assert_eq!(cache.hostname(&ip(1)), Some("host.example.com"));
+    }
+
+    #[test]
+    fn hostname_returns_none_for_non_resolved_statuses() {
+        let mut cache = RdnsCache::with_cap(10);
+        cache.insert(ip(1), pending());
+        assert_eq!(cache.hostname(&ip(1)), None);
+        // NxDomain also returns None.
+        cache.insert(ip(2), RdnsEntry { status: RdnsStatus::NxDomain, last_lookup: Instant::now() });
+        assert_eq!(cache.hostname(&ip(2)), None);
+    }
+
+    #[test]
+    fn insert_new_key_evicts_oldest_at_cap() {
+        let mut cache = RdnsCache::with_cap(2);
+        assert_eq!(cache.insert(ip(1), resolved("one.example")), None);
+        assert_eq!(cache.insert(ip(2), resolved("two.example")), None);
+        // Third insert should evict ip(1), the oldest.
+        let evicted = cache.insert(ip(3), resolved("three.example"));
+        assert_eq!(evicted, Some(ip(1)));
+        assert!(!cache.contains_key(&ip(1)), "evicted key must be gone");
+        assert!(cache.contains_key(&ip(2)));
+        assert!(cache.contains_key(&ip(3)));
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn update_existing_does_not_evict_and_stays_at_cap() {
+        let mut cache = RdnsCache::with_cap(2);
+        cache.insert(ip(1), pending());
+        cache.insert(ip(2), pending());
+        // Updating ip(1) from Pending → Resolved must not evict anything.
+        let evicted = cache.insert(ip(1), resolved("updated.example"));
+        assert_eq!(evicted, None, "re-insert of existing key must not evict");
+        assert_eq!(cache.len(), 2, "map must not grow beyond cap");
+        assert!(cache.contains_key(&ip(1)));
+        assert!(cache.contains_key(&ip(2)));
+    }
+
+    #[test]
+    fn update_existing_overwrites_entry() {
+        let mut cache = RdnsCache::with_cap(10);
+        cache.insert(ip(1), pending());
+        cache.insert(ip(1), resolved("after.example"));
+        assert_eq!(cache.hostname(&ip(1)), Some("after.example"));
+    }
+}
+
 /// Depth of the worker → main result channel. Small and drop-newest on
 /// `Full`: stale results are worthless and a stalled main thread shouldn't OOM
 /// us — the cache entry stays `Pending` and the next TTL sweep retries.

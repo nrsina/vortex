@@ -158,3 +158,125 @@ pub fn apply_results(rx: Res<RdnsResultRx>, mut cache: ResMut<RdnsCache>) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use bevy_ecs::system::RunSystemOnce;
+
+    use super::*;
+    use crate::core::flows::test_support::flow_key;
+
+    fn ip(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(1, 2, 3, last))
+    }
+
+    // --- request_lookups ---
+
+    #[test]
+    fn request_lookups_enqueues_both_src_and_dst_and_caches_pending() {
+        let (req_tx, req_rx) = crossbeam_channel::unbounded::<IpAddr>();
+        let mut world = World::new();
+        world.insert_resource(RdnsRequestTx(req_tx));
+        world.insert_resource(RdnsCache::with_cap(100));
+
+        let key = flow_key("1.2.3.4", 1000, "5.6.7.8", 443, 6);
+        world.spawn(key);
+
+        world.run_system_once(request_lookups).unwrap();
+
+        // Both endpoints must be in the request channel.
+        let mut received: Vec<IpAddr> = std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
+        received.sort();
+        let mut expected = vec![
+            "1.2.3.4".parse::<IpAddr>().unwrap(),
+            "5.6.7.8".parse::<IpAddr>().unwrap(),
+        ];
+        expected.sort();
+        assert_eq!(received, expected);
+
+        // Both must be recorded in the cache as Pending.
+        let cache = world.resource::<RdnsCache>();
+        for ip in &expected {
+            assert!(
+                matches!(cache.get(ip).map(|e| &e.status), Some(RdnsStatus::Pending)),
+                "{ip} should be Pending in cache"
+            );
+        }
+    }
+
+    #[test]
+    fn request_lookups_skips_ips_already_in_cache() {
+        let (req_tx, req_rx) = crossbeam_channel::unbounded::<IpAddr>();
+        let cached_ip = ip(10);
+        let mut world = World::new();
+        world.insert_resource(RdnsRequestTx(req_tx));
+        let mut cache = RdnsCache::with_cap(100);
+        // Pre-populate so request_lookups skips the src IP.
+        cache.insert(cached_ip, RdnsEntry {
+            status: RdnsStatus::Resolved("cached.example".to_string()),
+            last_lookup: Instant::now(),
+        });
+        world.insert_resource(cache);
+
+        // Flow whose src = cached IP; dst is fresh.
+        let fresh_ip = ip(20);
+        let key = crate::core::flows::components::FlowKey {
+            src_ip: cached_ip,
+            src_port: 1000,
+            dst_ip: fresh_ip,
+            dst_port: 443,
+            proto: 6,
+        };
+        world.spawn(key);
+
+        world.run_system_once(request_lookups).unwrap();
+
+        // Only the fresh dst IP should be enqueued.
+        let received: Vec<IpAddr> = std::iter::from_fn(|| req_rx.try_recv().ok()).collect();
+        assert!(!received.contains(&cached_ip), "already-cached IP must not be re-enqueued");
+        assert!(received.contains(&fresh_ip), "fresh IP must be enqueued");
+    }
+
+    // --- apply_results ---
+
+    #[test]
+    fn apply_results_writes_resolved_hostname_to_cache() {
+        let (res_tx, res_rx) = crossbeam_channel::unbounded::<(IpAddr, RdnsStatus)>();
+        let target = ip(1);
+        res_tx.send((target, RdnsStatus::Resolved("host.example.com".to_string()))).unwrap();
+        drop(res_tx);
+
+        let mut world = World::new();
+        world.insert_resource(RdnsResultRx(res_rx));
+        world.insert_resource(RdnsCache::with_cap(100));
+
+        world.run_system_once(apply_results).unwrap();
+
+        assert_eq!(
+            world.resource::<RdnsCache>().hostname(&target),
+            Some("host.example.com")
+        );
+    }
+
+    #[test]
+    fn apply_results_drains_all_pending_results() {
+        let (res_tx, res_rx) = crossbeam_channel::unbounded::<(IpAddr, RdnsStatus)>();
+        for i in 1..=3u8 {
+            res_tx.send((ip(i), RdnsStatus::NxDomain)).unwrap();
+        }
+        drop(res_tx);
+
+        let mut world = World::new();
+        world.insert_resource(RdnsResultRx(res_rx));
+        world.insert_resource(RdnsCache::with_cap(100));
+
+        world.run_system_once(apply_results).unwrap();
+
+        let cache = world.resource::<RdnsCache>();
+        for i in 1..=3u8 {
+            assert!(cache.contains_key(&ip(i)), "ip({i}) should be in cache after apply_results");
+        }
+    }
+}

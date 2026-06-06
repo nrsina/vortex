@@ -395,14 +395,14 @@ fn hostname_label(ip: IpAddr, rdns: &RdnsCache) -> String {
     }
 }
 
-fn port_label(port: u16, proto: u8) -> String {
+pub(crate) fn port_label(port: u16, proto: u8) -> String {
     match well_known(port, proto) {
         Some(name) => format!("{port} ({name})"),
         None => port.to_string(),
     }
 }
 
-fn humanize_duration(d: std::time::Duration) -> String {
+pub(crate) fn humanize_duration(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs >= 86_400 {
         format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
@@ -415,7 +415,7 @@ fn humanize_duration(d: std::time::Duration) -> String {
     }
 }
 
-fn with_thousands(n: u64) -> String {
+pub(crate) fn with_thousands(n: u64) -> String {
     // Tiny thousands-separator helper; pulls in no dep. `1234567` → `1,234,567`.
     let s = n.to_string();
     let bytes = s.as_bytes();
@@ -427,4 +427,78 @@ fn with_thousands(n: u64) -> String {
         out.push(*b as char);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use crate::core::common::{IPPROTO_TCP, IPPROTO_UDP};
+
+    // --- with_thousands ---
+
+    #[test]
+    fn with_thousands_small_no_separator() {
+        assert_eq!(with_thousands(0), "0");
+        assert_eq!(with_thousands(999), "999");
+    }
+
+    #[test]
+    fn with_thousands_exactly_one_comma() {
+        assert_eq!(with_thousands(1_000), "1,000");
+        assert_eq!(with_thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn with_thousands_boundaries() {
+        assert_eq!(with_thousands(999_999), "999,999");
+        assert_eq!(with_thousands(1_000_000), "1,000,000");
+    }
+
+    // --- humanize_duration ---
+
+    #[test]
+    fn humanize_duration_sub_minute() {
+        assert_eq!(humanize_duration(Duration::from_millis(500)), "0.500s");
+        assert_eq!(humanize_duration(Duration::from_secs(1)), "1.000s");
+        assert_eq!(humanize_duration(Duration::from_secs(59)), "59.000s");
+    }
+
+    #[test]
+    fn humanize_duration_minutes_and_seconds() {
+        assert_eq!(humanize_duration(Duration::from_secs(90)), "1m 30s");
+        assert_eq!(humanize_duration(Duration::from_secs(3599)), "59m 59s");
+    }
+
+    #[test]
+    fn humanize_duration_hours_and_minutes() {
+        assert_eq!(humanize_duration(Duration::from_secs(3600)), "1h 0m");
+        assert_eq!(humanize_duration(Duration::from_secs(7261)), "2h 1m");
+    }
+
+    #[test]
+    fn humanize_duration_days_and_hours() {
+        assert_eq!(humanize_duration(Duration::from_secs(86_400)), "1d 0h");
+        assert_eq!(humanize_duration(Duration::from_secs(90_061)), "1d 1h");
+    }
+
+    // --- port_label ---
+
+    #[test]
+    fn port_label_known_port_annotated() {
+        assert_eq!(port_label(443, IPPROTO_TCP), "443 (https)");
+        assert_eq!(port_label(53, IPPROTO_UDP), "53 (dns)");
+    }
+
+    #[test]
+    fn port_label_unknown_port_bare_number() {
+        assert_eq!(port_label(54321, IPPROTO_TCP), "54321");
+    }
+
+    #[test]
+    fn port_label_proto_specific_service() {
+        // port 514: syslog on UDP, shell on TCP
+        assert_eq!(port_label(514, IPPROTO_UDP), "514 (syslog)");
+        assert_eq!(port_label(514, IPPROTO_TCP), "514 (shell)");
+    }
 }

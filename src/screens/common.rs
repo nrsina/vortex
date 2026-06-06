@@ -174,7 +174,7 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
-    use crate::core::common::IPPROTO_TCP;
+    use crate::core::common::{IPPROTO_ICMP, IPPROTO_TCP, IPPROTO_UDP};
 
     fn key(src: (u8, u16), dst: (u8, u16)) -> FlowKey {
         FlowKey {
@@ -237,5 +237,52 @@ mod tests {
         assert!(out.contains('…'));
         assert!(out.starts_with("lhr25s27"));
         assert!(out.ends_with(".long"));
+    }
+
+    #[test]
+    fn ellipsize_exact_boundary_unchanged() {
+        // count == max: no truncation needed.
+        let s = "abc";
+        assert_eq!(ellipsize_middle(s, 3), "abc");
+    }
+
+    #[test]
+    fn ellipsize_max_1_returns_ellipsis() {
+        assert_eq!(ellipsize_middle("hello", 1), "…");
+    }
+
+    #[test]
+    fn ellipsize_max_0_nonempty_returns_ellipsis() {
+        // max <= 1 branch catches max == 0 on a non-empty string.
+        assert_eq!(ellipsize_middle("x", 0), "…");
+    }
+
+    #[test]
+    fn ellipsize_multibyte_utf8_correct_char_count() {
+        // "héllo wörld" has 11 chars but more than 11 bytes.
+        let s = "héllo wörld";
+        assert_eq!(s.chars().count(), 11);
+        let out = ellipsize_middle(s, 7);
+        // Must not panic and output must be exactly 7 chars wide.
+        assert_eq!(out.chars().count(), 7);
+        assert!(out.contains('…'));
+    }
+
+    #[test]
+    fn proto_name_known_protocols() {
+        assert_eq!(proto_name(IPPROTO_TCP), "TCP");
+        assert_eq!(proto_name(IPPROTO_UDP), "UDP");
+        assert_eq!(proto_name(IPPROTO_ICMP), "ICMP");
+    }
+
+    #[test]
+    fn proto_name_unknown_returns_question_mark() {
+        assert_eq!(proto_name(253), "?");
+    }
+
+    #[test]
+    fn sort_arrow_directions() {
+        assert_eq!(sort_arrow(SortDirection::Asc), "▲");
+        assert_eq!(sort_arrow(SortDirection::Desc), "▼");
     }
 }

@@ -27,7 +27,7 @@ const LOG_SCALE: f64 = 1000.0;
 /// Natural-log compress a single rate sample. `v = 0` maps to `0` (a blank
 /// column), and growth is logarithmic from there, so each order of magnitude
 /// occupies a roughly equal slice of the chart's height.
-fn log_scale(v: u64) -> u64 {
+pub(crate) fn log_scale(v: u64) -> u64 {
     (((v as f64) + 1.0).ln() * LOG_SCALE) as u64
 }
 
@@ -60,4 +60,22 @@ where
         // Absent (left-pad) columns render blank, matching the empty glyph,
         // so an unfilled history reads as empty space rather than a wall.
         .absent_value_symbol(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_scale_zero_maps_to_zero() {
+        // ln(1) == 0, so v=0 must produce 0 (a blank column).
+        assert_eq!(log_scale(0), 0);
+    }
+
+    #[test]
+    fn log_scale_monotonic_growth() {
+        assert!(log_scale(1) < log_scale(10));
+        assert!(log_scale(10) < log_scale(100));
+        assert!(log_scale(100) < log_scale(10_000));
+    }
 }

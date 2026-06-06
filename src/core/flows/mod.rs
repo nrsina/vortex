@@ -9,6 +9,9 @@ pub mod ipclass;
 pub mod packet;
 pub mod service;
 
+#[cfg(test)]
+pub mod test_support;
+
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -24,7 +27,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use aggregator::{DeltaChannel, FlowDelta};
 use components::FlowKey;
 use crate::core::flows::cleanup::SWEEP_INTERVAL;
-use crate::core::settings::settings;
+use crate::core::settings::{settings, TickRate};
 
 #[derive(Resource, Default)]
 pub struct FlowIndex(pub FxHashMap<FlowKey, Entity>);
@@ -95,6 +98,10 @@ impl Plugin for FlowsPlugin {
         // Always present so `ingest`'s `Res<LocalAddrs>` never goes missing;
         // `start_pipeline` overwrites it with the real set when capture begins.
         world.insert_resource(LocalAddrs::default());
+        // Flow-lifecycle settings injected as resources so system tests can
+        // override them without touching the global `settings()` OnceLock.
+        world.insert_resource(settings().flows);
+        world.insert_resource(TickRate(settings().tick_rate_hz));
 
         // `ingest` only fires once the user picks an interface and the
         // capture pipeline has been started (`start_pipeline` inserts the
@@ -159,4 +166,86 @@ pub fn stop_pipeline(commands: &mut Commands) {
     // Reset (rather than remove) so the always-present `LocalAddrs` invariant
     // holds for `ingest` even between captures.
     commands.insert_resource(LocalAddrs::default());
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    use bevy_ecs::prelude::*;
+    use bevy_ecs::schedule::ExecutorKind;
+
+    use super::*;
+    use crate::core::flows::aggregate::tick;
+    use crate::core::flows::aggregator::{DeltaChannel, FlowDelta};
+    use crate::core::flows::ingest::ingest;
+    use crate::core::flows::test_support::flow_key;
+    use crate::core::settings::{FlowSettings, TickRate};
+
+    /// Two-tick integration test: `ingest` spawns an entity (tick 1), then
+    /// `tick` processes its `bytes_since_last_tick` and writes `bps` (tick 2).
+    /// Validates that the two systems can run in a shared `Schedule` without
+    /// resource conflicts and that their hand-off semantics are correct.
+    #[test]
+    fn two_tick_schedule_ingest_then_aggregate() {
+        let (tx, rx) = crossbeam_channel::unbounded::<Vec<FlowDelta>>();
+        let dropped = Arc::new(AtomicU64::new(0));
+
+        let mut world = World::new();
+        world.insert_resource(FlowIndex::default());
+        world.insert_resource(LiveMetrics::default());
+        world.insert_resource(LocalAddrs::default());
+        world.insert_resource(DeltaChannel { rx, dropped });
+        // Hz=10 so bytes_since_last_tick * 10 is the instantaneous bps.
+        world.insert_resource(TickRate(10));
+        world.insert_resource(FlowSettings::default());
+
+        let mut schedule = Schedule::default();
+        schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+        // Chain ensures ingest runs before tick in every schedule execution.
+        schedule.add_systems((ingest, tick).chain());
+
+        let key = flow_key("10.0.0.1", 5000, "10.0.0.2", 443, 6);
+
+        // Tick 1: send batch so ingest spawns the entity (via deferred Commands).
+        // tick sees 0 active flows this round; deferred spawn flushes at end of run.
+        tx.send(vec![FlowDelta {
+            key,
+            bytes: 1000,
+            packets: 1,
+            last_summary: None,
+            app_host: None,
+        }]).unwrap();
+        schedule.run(&mut world);
+
+        // Entity should now exist in FlowIndex.
+        assert!(
+            world.resource::<FlowIndex>().0.contains_key(&key),
+            "entity must be indexed after tick 1"
+        );
+
+        // Tick 2: ingest has nothing new; tick processes the entity. The
+        // bytes_since_last_tick from tick 1 (0, first-batch is lost for a new
+        // entity) will be processed. Send another batch so tick 2 has
+        // bytes_since_last_tick = 2000 which feeds the EWMA.
+        tx.send(vec![FlowDelta {
+            key,
+            bytes: 2000,
+            packets: 2,
+            last_summary: None,
+            app_host: None,
+        }]).unwrap();
+        schedule.run(&mut world);
+
+        // After tick 2 the entity has bps > 0 (2000 bytes × 10 Hz × EWMA).
+        let &entity = world.resource::<FlowIndex>().0.get(&key).unwrap();
+        let stats = world.get::<crate::core::flows::components::TrafficStats>(entity).unwrap();
+        assert!(stats.bps > 0.0, "bps should be > 0 after two ticks, got {}", stats.bps);
+        assert_eq!(stats.bytes_since_last_tick, 0, "tick must reset bytes_since_last_tick");
+
+        // LiveMetrics must reflect the one active flow.
+        let m = world.resource::<LiveMetrics>();
+        assert_eq!(m.active_flows, 1);
+    }
 }

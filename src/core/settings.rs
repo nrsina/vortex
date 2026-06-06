@@ -1,3 +1,4 @@
+use bevy_ecs::prelude::Resource;
 use config::Config;
 use std::sync::OnceLock;
 
@@ -23,7 +24,7 @@ pub struct Settings {
 /// delete, since the whole point of retaining expired flows is to not lose
 /// them. Once the expired set exceeds the cap, the oldest (by last packet) are
 /// evicted.
-#[derive(Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone, Copy)]
 pub struct FlowSettings {
     /// Seconds of silence before a flow is marked expired (dimmed, dropped
     /// from the "active" count, but still retained). Clamped to `[5, 86_400]`.
@@ -42,6 +43,12 @@ impl Default for FlowSettings {
         }
     }
 }
+
+/// ECS resource carrying the configured tick rate. Inserted once at startup
+/// by `FlowsPlugin` so `aggregate::tick` can read it without touching the
+/// global `settings()` `OnceLock` — making system tests injectable.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct TickRate(pub u8);
 
 /// Knobs for the packet-capture handle. Read from `[capture]` in
 /// `Settings.toml`; falls back to sane defaults when the section is absent.

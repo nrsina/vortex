@@ -170,3 +170,57 @@ fn send_or_drop(tx: &Sender<RdnsResult>, item: RdnsResult) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn qps_floored_to_1() {
+        // qps=0.5 is treated as 1.0; the first take must return ZERO.
+        let mut r = RateLimiter::new(0.5);
+        assert_eq!(r.take(), Duration::ZERO);
+    }
+
+    #[test]
+    fn fresh_bucket_full_first_take_returns_zero() {
+        let mut r = RateLimiter::new(5.0);
+        assert_eq!(r.take(), Duration::ZERO, "bucket starts full");
+    }
+
+    #[test]
+    fn ceil_qps_takes_return_zero_then_next_requires_wait() {
+        // With qps=3.0 the bucket starts at 3.0 tokens: the first 3 calls
+        // must all return ZERO; the 4th (made immediately) must return > ZERO.
+        let mut r = RateLimiter::new(3.0);
+        for i in 0..3 {
+            assert_eq!(r.take(), Duration::ZERO, "take #{i} should return ZERO");
+        }
+        assert!(r.take() > Duration::ZERO, "4th take should require wait");
+    }
+
+    #[test]
+    fn qps1_first_zero_second_nonzero() {
+        let mut r = RateLimiter::new(1.0);
+        assert_eq!(r.take(), Duration::ZERO);
+        assert!(r.take() > Duration::ZERO);
+    }
+
+    #[test]
+    fn wait_duration_roughly_one_over_qps() {
+        // After draining qps=2.0 (2 free takes), the 3rd take should report
+        // ~0.5 s of wait (1 token / 2 qps). We allow a generous ±20 % band to
+        // stay robust against scheduler jitter.
+        let mut r = RateLimiter::new(2.0);
+        r.take(); // token 1
+        r.take(); // token 2
+        let wait = r.take();
+        let secs = wait.as_secs_f32();
+        assert!(
+            (0.4..=0.6).contains(&secs),
+            "expected ~0.5 s wait, got {secs:.3} s"
+        );
+    }
+}

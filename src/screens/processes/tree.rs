@@ -306,3 +306,168 @@ fn conn_sort_fields(c: &ChildRow) -> (u64, f32, Instant) {
         ChildRow::Flow { stats, .. } => (stats.bytes, stats.bps, Instant::now()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::core::common::IPPROTO_TCP;
+    use crate::core::processes::ProcessAggregate;
+    use crate::core::flows::test_support::{flow_key, traffic_stats};
+    use crate::screens::common::SortDirection;
+    use crate::screens::processes::state::{FrozenProcessRow, ProcSortColumn};
+
+    fn make_parent(pid: u32, name: &str, bps: f32, bytes: u64) -> FrozenProcessRow {
+        FrozenProcessRow {
+            pid,
+            name: name.to_string(),
+            user: None,
+            cmd: String::new(),
+            alive: true,
+            agg: ProcessAggregate { bps, bytes, packets: 0, conn_count: 1 },
+            children: vec![],
+        }
+    }
+
+    fn child(bytes: u64, bps: f32, expired: bool, ago_secs: u64) -> (FlowKey, TrafficStats, Instant, bool, Direction) {
+        let first_seen = Instant::now()
+            .checked_sub(Duration::from_secs(ago_secs))
+            .unwrap_or_else(Instant::now);
+        (
+            flow_key("10.0.0.1", 1234, "8.8.8.8", 53, IPPROTO_TCP),
+            traffic_stats(bytes, bps, 0),
+            first_seen,
+            expired,
+            Direction::Outbound,
+        )
+    }
+
+    // --- sort_parents ---
+
+    #[test]
+    fn sort_parents_fixed_orders_by_pid_asc() {
+        let mut parents = vec![
+            make_parent(30, "c", 0.0, 0),
+            make_parent(10, "a", 0.0, 0),
+            make_parent(20, "b", 0.0, 0),
+        ];
+        sort_parents(&mut parents, ProcSortColumn::Fixed, SortDirection::Asc);
+        let pids: Vec<u32> = parents.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, [10, 20, 30]);
+    }
+
+    #[test]
+    fn sort_parents_by_bps_desc() {
+        let mut parents = vec![
+            make_parent(1, "low", 10.0, 0),
+            make_parent(2, "high", 100.0, 0),
+            make_parent(3, "mid", 50.0, 0),
+        ];
+        sort_parents(&mut parents, ProcSortColumn::Bps, SortDirection::Desc);
+        let bps: Vec<u32> = parents.iter().map(|p| p.agg.bps as u32).collect();
+        assert_eq!(bps, [100, 50, 10]);
+    }
+
+    #[test]
+    fn sort_parents_by_name_asc() {
+        let mut parents = vec![
+            make_parent(1, "zsh", 0.0, 0),
+            make_parent(2, "curl", 0.0, 0),
+            make_parent(3, "bash", 0.0, 0),
+        ];
+        sort_parents(&mut parents, ProcSortColumn::Name, SortDirection::Asc);
+        let names: Vec<&str> = parents.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["bash", "curl", "zsh"]);
+    }
+
+    #[test]
+    fn sort_parents_direction_reversal() {
+        let mut asc = vec![
+            make_parent(1, "a", 10.0, 0),
+            make_parent(2, "b", 50.0, 0),
+            make_parent(3, "c", 30.0, 0),
+        ];
+        let mut desc = asc.clone();
+        sort_parents(&mut asc, ProcSortColumn::Bps, SortDirection::Asc);
+        sort_parents(&mut desc, ProcSortColumn::Bps, SortDirection::Desc);
+        let pids_asc: Vec<u32> = asc.iter().map(|p| p.pid).collect();
+        let pids_desc: Vec<u32> = desc.iter().map(|p| p.pid).collect();
+        assert_ne!(pids_asc, pids_desc);
+        // Desc reverses Asc (reversed order).
+        let mut reversed = pids_asc.clone();
+        reversed.reverse();
+        assert_eq!(pids_desc, reversed);
+    }
+
+    #[test]
+    fn sort_parents_also_sorts_children_by_bps() {
+        let mut parent = make_parent(1, "p", 0.0, 0);
+        parent.children = vec![
+            child(100, 10.0, false, 3),
+            child(500, 80.0, false, 1),
+            child(200, 40.0, false, 2),
+        ];
+        sort_parents(
+            std::slice::from_mut(&mut parent),
+            ProcSortColumn::Bps,
+            SortDirection::Desc,
+        );
+        let bps: Vec<u32> = parent.children.iter().map(|(_, s, _, _, _)| s.bps as u32).collect();
+        assert_eq!(bps, [80, 40, 10]);
+    }
+
+    // --- child_rows ---
+
+    #[test]
+    fn child_rows_non_aggregate_returns_flows() {
+        let mut parent = make_parent(1, "p", 0.0, 0);
+        parent.children = vec![
+            child(100, 10.0, false, 2),
+            child(200, 20.0, false, 1),
+        ];
+        let rows = child_rows(&parent, true, false, ProcSortColumn::Fixed, SortDirection::Asc);
+        assert_eq!(rows.len(), 2);
+        for r in &rows {
+            assert!(matches!(r, ChildRow::Flow { .. }));
+        }
+    }
+
+    #[test]
+    fn child_rows_filters_expired_when_hidden() {
+        let mut parent = make_parent(1, "p", 0.0, 0);
+        parent.children = vec![
+            child(100, 10.0, false, 2), // alive
+            child(200, 20.0, true, 1),  // expired
+        ];
+        let visible = child_rows(&parent, false, false, ProcSortColumn::Fixed, SortDirection::Asc);
+        assert_eq!(visible.len(), 1);
+        if let ChildRow::Flow { expired, .. } = &visible[0] {
+            assert!(!expired);
+        }
+    }
+
+    #[test]
+    fn child_rows_aggregate_merges_opposing_flows_into_conn() {
+        let outbound_key = flow_key("10.0.0.1", 1234, "8.8.8.8", 53, IPPROTO_TCP);
+        let inbound_key  = flow_key("8.8.8.8", 53, "10.0.0.1", 1234, IPPROTO_TCP);
+        let t = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+
+        let mut parent = make_parent(1, "p", 0.0, 0);
+        parent.children = vec![
+            (outbound_key, traffic_stats(1000, 100.0, 10), t, false, Direction::Outbound),
+            (inbound_key,  traffic_stats(500,  50.0,  5),  t, false, Direction::Inbound),
+        ];
+
+        let rows = child_rows(&parent, true, true, ProcSortColumn::Fixed, SortDirection::Asc);
+        // Two opposing flows should merge into a single Conn row.
+        assert_eq!(rows.len(), 1);
+        if let ChildRow::Conn { bytes, bps, expired, .. } = &rows[0] {
+            assert_eq!(*bytes, 1500);
+            assert!((bps - 150.0).abs() < 0.01, "bps={bps}");
+            assert!(!expired);
+        } else {
+            panic!("expected ChildRow::Conn, got Flow");
+        }
+    }
+}

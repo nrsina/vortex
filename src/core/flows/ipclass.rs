@@ -172,4 +172,33 @@ mod tests {
         assert!(!IpClass::PublicV4.is_skippable());
         assert!(!IpClass::PublicV6.is_skippable());
     }
+
+    #[test]
+    fn ipv4_unspecified_classified_as_broadcast() {
+        // 0.0.0.0 (unspecified) is placed in the Broadcast bucket so it is
+        // skippable and never sent to the resolver.
+        assert_eq!(classify(ip("0.0.0.0")), IpClass::Broadcast);
+    }
+
+    #[test]
+    fn ipv4_private_172_boundaries() {
+        // 172.16/12 covers 172.16.0.0 – 172.31.255.255.
+        assert_eq!(classify(ip("172.16.0.0")), IpClass::PrivateV4);
+        assert_eq!(classify(ip("172.31.255.255")), IpClass::PrivateV4);
+        // One step outside the block is public.
+        assert_eq!(classify(ip("172.32.0.0")), IpClass::PublicV4);
+    }
+
+    #[test]
+    fn ipv6_unspecified_classified_as_reserved() {
+        assert_eq!(classify(ip("::")), IpClass::Ipv6Reserved);
+    }
+
+    #[test]
+    fn ipv6_link_local_upper_boundary() {
+        // fe80::/10 ends at febf:ffff:…:ffff — all still link-local.
+        assert_eq!(classify(ip("febf::1")), IpClass::LinkLocal);
+        // fec0:: is outside fe80::/10 and not ULA → falls through to PublicV6.
+        assert_eq!(classify(ip("fec0::1")), IpClass::PublicV6);
+    }
 }

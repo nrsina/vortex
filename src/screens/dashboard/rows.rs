@@ -113,3 +113,75 @@ pub fn process_sort_key(row: &FlowRow) -> (u8, &str, u32) {
         None => (1, "", u32::MAX),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+    use crate::core::flows::components::Direction;
+    use crate::core::flows::test_support::{flow_key, traffic_stats};
+
+    fn row_with_process(pid: Option<u32>, name: Option<&str>) -> FlowRow {
+        FlowRow {
+            key: flow_key("1.2.3.4", 1234, "5.6.7.8", 443, 6),
+            stats: traffic_stats(0, 0.0, 0),
+            direction: Direction::Unknown,
+            last_summary: None,
+            app_host: None,
+            first_seen: Instant::now(),
+            last_seen: Instant::now(),
+            expired: false,
+            pid,
+            process_name: name.map(String::from),
+        }
+    }
+
+    // --- format_process ---
+
+    #[test]
+    fn format_process_short_name_with_pid() {
+        assert_eq!(format_process(Some(42), Some("firefox")), "firefox(42)");
+    }
+
+    #[test]
+    fn format_process_long_name_truncated_at_14_chars() {
+        // Name > 14 chars gets truncated to 13 + '…', then (pid) appended.
+        let long = "verylongprocess"; // 15 chars
+        let result = format_process(Some(7), Some(long));
+        // First 13 chars of "verylongprocess" + '…' + "(7)"
+        assert!(result.starts_with("verylongproce…"), "got: {result:?}");
+        assert!(result.ends_with("(7)"), "got: {result:?}");
+    }
+
+    #[test]
+    fn format_process_pid_fallback_when_no_name() {
+        assert_eq!(format_process(Some(99), None), "pid:99");
+    }
+
+    #[test]
+    fn format_process_dash_when_no_pid() {
+        assert_eq!(format_process(None, None), "-");
+        assert_eq!(format_process(None, Some("ignored")), "-");
+    }
+
+    // --- process_sort_key ---
+
+    #[test]
+    fn process_sort_key_attributed_before_unattributed() {
+        let attributed = row_with_process(Some(1), Some("curl"));
+        let unattributed = row_with_process(None, None);
+        // Attributed row's key bucket (0 < 1) sorts before unattributed.
+        assert!(process_sort_key(&attributed) < process_sort_key(&unattributed));
+    }
+
+    #[test]
+    fn process_sort_key_orders_by_name_then_pid() {
+        let a = row_with_process(Some(10), Some("alpha"));
+        let b = row_with_process(Some(20), Some("beta"));
+        let a2 = row_with_process(Some(20), Some("alpha")); // same name, higher pid
+        // "alpha" < "beta" alphabetically.
+        assert!(process_sort_key(&a) < process_sort_key(&b));
+        // Same name: lower pid first.
+        assert!(process_sort_key(&a) < process_sort_key(&a2));
+    }
+}

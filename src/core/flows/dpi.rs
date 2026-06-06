@@ -321,4 +321,94 @@ mod tests {
         assert_eq!(AppKind::from_u8(0), None);
         assert_eq!(AppKind::from_u8(99), None);
     }
+
+    /// Build a TLS ClientHello with a caller-supplied raw extension block,
+    /// reusing the same structure as `client_hello_with_sni` but accepting
+    /// pre-assembled extension bytes so multi-extension scenarios are easy.
+    fn build_client_hello_with_ext_block(ext_block: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]); // client_version
+        body.extend_from_slice(&[0u8; 32]);    // random
+        body.push(0x00);                        // session_id len = 0
+        body.extend_from_slice(&[0x00, 0x02, 0x00, 0x2f]); // 1 cipher suite
+        body.extend_from_slice(&[0x01, 0x00]); // compression methods
+        body.extend_from_slice(&(ext_block.len() as u16).to_be_bytes());
+        body.extend_from_slice(ext_block);
+
+        let mut handshake = Vec::new();
+        handshake.push(0x01); // ClientHello
+        let blen = body.len();
+        handshake.extend_from_slice(&[(blen >> 16) as u8, (blen >> 8) as u8, blen as u8]);
+        handshake.extend_from_slice(&body);
+
+        let mut record = Vec::new();
+        record.push(0x16); // handshake
+        record.extend_from_slice(&[0x03, 0x01]);
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
+    }
+
+    #[test]
+    fn rejects_truncated_extension_data() {
+        // Extension type 0x000F claims elen=100 bytes but only 2 bytes follow.
+        // The parser tries ext.get(4..104) → None → returns None.
+        let ext: &[u8] = &[0x00, 0x0F, 0x00, 0x64, 0x00, 0x00];
+        let hello = build_client_hello_with_ext_block(ext);
+        assert_eq!(parse_tls_sni(&hello), None);
+    }
+
+    #[test]
+    fn finds_sni_after_non_sni_extension() {
+        // Parser must skip extension type 0x000F and still find the SNI that follows.
+        let host = b"example.com";
+        let dummy_data = b"hello";
+
+        let mut sni_data = Vec::new();
+        let entry_len = 1usize + 2 + host.len();
+        sni_data.extend_from_slice(&(entry_len as u16).to_be_bytes());
+        sni_data.push(0x00); // name_type = host_name
+        sni_data.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        sni_data.extend_from_slice(host);
+
+        let mut ext_block = Vec::new();
+        // First: dummy extension 0x000F with 5 bytes of data.
+        ext_block.extend_from_slice(&0x000Fu16.to_be_bytes());
+        ext_block.extend_from_slice(&(dummy_data.len() as u16).to_be_bytes());
+        ext_block.extend_from_slice(dummy_data);
+        // Second: SNI extension.
+        ext_block.extend_from_slice(&0x0000u16.to_be_bytes());
+        ext_block.extend_from_slice(&(sni_data.len() as u16).to_be_bytes());
+        ext_block.extend_from_slice(&sni_data);
+
+        let hello = build_client_hello_with_ext_block(&ext_block);
+        assert_eq!(parse_tls_sni(&hello), Some("example.com"));
+    }
+
+    #[test]
+    fn rejects_empty_dns_qname() {
+        // QNAME starting with the root label (length 0) → empty name → None.
+        let q: &[u8] = &[
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, // root label immediately
+            0x00, 0x01, 0x00, 0x01,
+        ];
+        assert_eq!(parse_dns_qname(q), None);
+    }
+
+    #[test]
+    fn rejects_dns_qname_exceeding_255_bytes() {
+        // 6 × 50-char labels + 5 dots = 305 chars > 255 → None, no hang.
+        let mut q = Vec::new();
+        q.extend_from_slice(&[0x12, 0x34, 0x01, 0x00, 0x00, 0x01,
+                               0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        for _ in 0..6 {
+            q.push(50); // label length
+            q.extend_from_slice(&[b'a'; 50]);
+        }
+        q.push(0x00); // root label
+        q.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+        assert_eq!(parse_dns_qname(&q), None);
+    }
 }

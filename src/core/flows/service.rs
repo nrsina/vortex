@@ -113,4 +113,21 @@ mod tests {
     fn unknown_port() {
         assert_eq!(well_known(54321, IPPROTO_TCP), None);
     }
+
+    #[test]
+    fn spot_check_additional_ports() {
+        assert_eq!(well_known(80, IPPROTO_TCP), Some("http"));
+        assert_eq!(well_known(25, IPPROTO_TCP), Some("smtp"));
+        assert_eq!(well_known(3306, IPPROTO_TCP), Some("mysql"));
+        assert_eq!(well_known(5432, IPPROTO_TCP), Some("postgresql"));
+        assert_eq!(well_known(6379, IPPROTO_TCP), Some("redis"));
+        assert_eq!(well_known(27017, IPPROTO_TCP), Some("mongodb"));
+    }
+
+    #[test]
+    fn udp_only_ports_annotated() {
+        assert_eq!(well_known(67, IPPROTO_UDP), Some("dhcp-server"));
+        assert_eq!(well_known(68, IPPROTO_UDP), Some("dhcp-client"));
+        assert_eq!(well_known(123, IPPROTO_UDP), Some("ntp"));
+    }
 }
